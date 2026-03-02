@@ -53,7 +53,7 @@ function wpsanyueimg_setting_page() {
 	}
 	?>
 <div class="wrap">
-	<h1>ImgBed 存储设置</h1>
+	<h1>cloudflare-ImgBed 存储设置</h1>
 	<p>
 		<a href="https://github.com/imysen/wp-sanyueqicfimg" target="_blank">项目主页</a> |
 		<a href="https://cfbed.sanyue.de/" target="_blank">CloudFlare-imgbed 项目文档</a>

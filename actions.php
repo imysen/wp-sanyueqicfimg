@@ -555,7 +555,7 @@ function wpsanyueimg_add_setting_page() {
 	if (!function_exists('wpsanyueimg_setting_page')) {
 		require_once 'setting_page.php';
 	}
-	add_options_page('WP ImgBed 设置', 'ImgBed 存储设置', 'manage_options', __FILE__, 'wpsanyueimg_setting_page');
+	add_options_page('WP ImgBed 设置', 'cloudflare-ImgBed 存储设置', 'manage_options', __FILE__, 'wpsanyueimg_setting_page');
 }
 
 // 在插件列表页添加设置按钮
