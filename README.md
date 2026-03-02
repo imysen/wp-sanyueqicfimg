@@ -1,6 +1,6 @@
 # WP-SanyueqiCfimg
 
-WordPress 媒体库对接 [CloudFlare ImgBed](https://cfbed.sanyue.de/) 的插件。
+WordPress 媒体库对接 [CloudFlare ImgBed](https://cfbed.sanyue.de/) 的插件，实现静态资源存储到CloudFlare ImgBed存储中，提高访问速度
 ![alt text](https://cfimgbed-cncdn.236668.xyz/file/1772471761538.webp)
 
 > [!WARNING]
