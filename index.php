@@ -3,7 +3,7 @@
 Plugin Name: WP-SanyueqiCfimg(CloudFlare-ImgBed 对接wordpress媒体库插件)
 Plugin URI: https://blog.imysen.com
 Description: WordPress 媒体库对接到 CloudFlare ImgBed，通过 API Token 接管媒体库上传与删除。
-Version: 1.0
+Version: 1.0.0
 Author: 邹云森森
 Author URI: https://blog.imysen.com
 Requires PHP: 7.4
@@ -42,6 +42,8 @@ add_filter('wp_get_attachment_url', 'wpsanyueimg_filter_attachment_url', 10, 2);
 add_filter( 'pre_set_site_transient_update_plugins', 'wpsanyueimg_check_plugin_update' );
 add_filter( 'plugins_api', 'wpsanyueimg_plugins_api', 10, 3 );
 add_filter( 'auto_update_plugin', 'wpsanyueimg_auto_update_plugin', 10, 2 );
+add_action( 'wp_ajax_wpsanyueimg_check_update_popup', 'wpsanyueimg_ajax_check_update_popup' );
+add_action( 'wp_ajax_wpsanyueimg_apply_update', 'wpsanyueimg_ajax_apply_update' );
 
 # 添加插件设置菜单
 add_action('admin_menu', 'wpsanyueimg_add_setting_page');

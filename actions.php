@@ -222,6 +222,244 @@ function wpsanyueimg_force_check_update_now() {
 	return ! empty( $meta );
 }
 
+function wpsanyueimg_get_update_summary() {
+	$meta = wpsanyueimg_fetch_update_meta( true );
+	$current_version = wpsanyueimg_normalize_version( wpsanyueimg_get_plugin_version() );
+	$remote_version = wpsanyueimg_normalize_version( $meta['new_version'] ?? '' );
+	$has_update = '' !== $remote_version && version_compare( $remote_version, $current_version, '>' );
+
+	$homepage = ! empty( $meta['homepage'] ) ? esc_url_raw( (string) $meta['homepage'] ) : 'https://github.com/imysen/wp-sanyueqicfimg';
+	$release_url = '';
+	if ( '' !== $homepage ) {
+		$release_url = trailingslashit( untrailingslashit( $homepage ) ) . 'releases';
+	}
+
+	return array(
+		'has_update' => $has_update,
+		'current_version' => $current_version,
+		'new_version' => $remote_version,
+		'changelog' => (string) ( $meta['changelog'] ?? '' ),
+		'homepage' => $homepage,
+		'github_release_url' => $release_url,
+		'download_url' => (string) ( $meta['download_url'] ?? '' ),
+	);
+}
+
+function wpsanyueimg_collect_files_recursive( $base_dir, $start_time, $timeout_seconds ) {
+	$files = array();
+	$base_dir = rtrim( (string) $base_dir, '/' );
+	if ( '' === $base_dir || ! is_dir( $base_dir ) ) {
+		return $files;
+	}
+
+	$iterator = new RecursiveIteratorIterator(
+		new RecursiveDirectoryIterator( $base_dir, RecursiveDirectoryIterator::SKIP_DOTS )
+	);
+
+	foreach ( $iterator as $item ) {
+		if ( microtime( true ) - $start_time > $timeout_seconds ) {
+			throw new RuntimeException( '更新超时（超过60秒）。' );
+		}
+		if ( ! $item->isFile() ) {
+			continue;
+		}
+
+		$full_path = (string) $item->getPathname();
+		$relative = ltrim( substr( $full_path, strlen( $base_dir ) ), '/' );
+		if ( '' === $relative ) {
+			continue;
+		}
+		if ( 0 === strpos( $relative, '.git/' ) || '.git' === $relative ) {
+			continue;
+		}
+
+		$files[ $relative ] = $full_path;
+	}
+
+	return $files;
+}
+
+function wpsanyueimg_find_extracted_root( $extract_dir ) {
+	$extract_dir = rtrim( (string) $extract_dir, '/' );
+	$index_file = $extract_dir . '/index.php';
+	if ( file_exists( $index_file ) ) {
+		return $extract_dir;
+	}
+
+	$children = glob( $extract_dir . '/*', GLOB_ONLYDIR );
+	if ( ! is_array( $children ) ) {
+		return '';
+	}
+
+	foreach ( $children as $child ) {
+		if ( file_exists( rtrim( $child, '/' ) . '/index.php' ) ) {
+			return rtrim( $child, '/' );
+		}
+	}
+
+	return '';
+}
+
+function wpsanyueimg_perform_safe_update( $meta ) {
+	$start_time = microtime( true );
+	$timeout_seconds = 60;
+
+	$download_url = esc_url_raw( (string) ( $meta['download_url'] ?? '' ) );
+	if ( '' === $download_url ) {
+		throw new RuntimeException( '缺少更新包下载地址。' );
+	}
+
+	require_once ABSPATH . 'wp-admin/includes/file.php';
+
+	$upload_dir = wp_upload_dir();
+	$base_dir = is_array( $upload_dir ) && ! empty( $upload_dir['basedir'] ) ? $upload_dir['basedir'] : WP_CONTENT_DIR;
+	$update_base_dir = trailingslashit( $base_dir ) . 'wpsanyueqicfimg-update';
+	if ( ! file_exists( $update_base_dir ) && ! wp_mkdir_p( $update_base_dir ) ) {
+		throw new RuntimeException( '无法创建更新目录。' );
+	}
+
+	$job_dir = trailingslashit( $update_base_dir ) . 'job-' . gmdate( 'Ymd-His' ) . '-' . wp_generate_password( 6, false, false );
+	if ( ! wp_mkdir_p( $job_dir ) ) {
+		throw new RuntimeException( '无法创建更新任务目录。' );
+	}
+
+	$tmp_zip = download_url( $download_url, $timeout_seconds );
+	if ( is_wp_error( $tmp_zip ) ) {
+		throw new RuntimeException( '下载更新包失败：' . $tmp_zip->get_error_message() );
+	}
+
+	$extract_result = unzip_file( $tmp_zip, $job_dir );
+	@unlink( $tmp_zip );
+	if ( is_wp_error( $extract_result ) ) {
+		throw new RuntimeException( '解压更新包失败：' . $extract_result->get_error_message() );
+	}
+
+	if ( microtime( true ) - $start_time > $timeout_seconds ) {
+		throw new RuntimeException( '更新超时（超过60秒）。' );
+	}
+
+	$source_root = wpsanyueimg_find_extracted_root( $job_dir );
+	if ( '' === $source_root ) {
+		throw new RuntimeException( '无法定位更新包根目录。' );
+	}
+
+	$target_root = rtrim( WPSANYUEIMG_PLUGIN_DIR, '/' );
+	$source_files = wpsanyueimg_collect_files_recursive( $source_root, $start_time, $timeout_seconds );
+	$target_files = wpsanyueimg_collect_files_recursive( $target_root, $start_time, $timeout_seconds );
+
+	$changed = array();
+	foreach ( $source_files as $relative => $source_file ) {
+		if ( microtime( true ) - $start_time > $timeout_seconds ) {
+			throw new RuntimeException( '更新超时（超过60秒）。' );
+		}
+		$target_file = $target_root . '/' . $relative;
+		if ( ! isset( $target_files[ $relative ] ) ) {
+			$changed[] = $relative;
+			continue;
+		}
+		$src_hash = @md5_file( $source_file );
+		$dst_hash = @md5_file( $target_file );
+		if ( false === $src_hash || false === $dst_hash || $src_hash !== $dst_hash ) {
+			$changed[] = $relative;
+		}
+	}
+
+	$replaced = 0;
+	foreach ( $changed as $relative ) {
+		if ( microtime( true ) - $start_time > $timeout_seconds ) {
+			throw new RuntimeException( '更新超时（超过60秒）。' );
+		}
+		$source_file = $source_root . '/' . $relative;
+		$target_file = $target_root . '/' . $relative;
+		$target_dir = dirname( $target_file );
+		if ( ! file_exists( $target_dir ) && ! wp_mkdir_p( $target_dir ) ) {
+			throw new RuntimeException( '创建目录失败：' . $target_dir );
+		}
+		if ( ! @copy( $source_file, $target_file ) ) {
+			throw new RuntimeException( '替换文件失败：' . $relative );
+		}
+		$replaced++;
+	}
+
+	if ( function_exists( 'wp_opcache_invalidate_directory' ) ) {
+		wp_opcache_invalidate_directory( $target_root );
+	}
+
+	return array(
+		'update_dir' => $job_dir,
+		'changed_count' => count( $changed ),
+		'replaced_count' => $replaced,
+		'time_cost' => round( microtime( true ) - $start_time, 3 ),
+	);
+}
+
+function wpsanyueimg_ajax_check_update_popup() {
+	if ( ! current_user_can( 'manage_options' ) ) {
+		wp_send_json_error( array( 'message' => '权限不足。' ), 403 );
+	}
+	check_ajax_referer( 'wpsanyueimg_update_nonce', 'nonce' );
+	$options = wpsanyueimg_get_options();
+	$manual = isset( $_POST['manual'] ) && '1' === (string) $_POST['manual'];
+	if ( ! $manual && ( ! is_array( $options ) || empty( $options['enable_auto_update'] ) ) ) {
+		wp_send_json_error( array( 'message' => '未开启自动更新，已跳过弹窗检测。' ), 400 );
+	}
+
+	$summary = wpsanyueimg_get_update_summary();
+	if ( '' === (string) ( $summary['new_version'] ?? '' ) || '' === (string) ( $summary['download_url'] ?? '' ) ) {
+		wp_send_json_error( array( 'message' => '更新信息获取失败，请检查更新源地址或网络。' ), 500 );
+	}
+	wp_send_json_success( $summary );
+}
+
+function wpsanyueimg_ajax_apply_update() {
+	if ( ! current_user_can( 'manage_options' ) ) {
+		wp_send_json_error( array( 'message' => '权限不足。' ), 403 );
+	}
+	check_ajax_referer( 'wpsanyueimg_update_nonce', 'nonce' );
+	$options = wpsanyueimg_get_options();
+	if ( ! is_array( $options ) || empty( $options['enable_auto_update'] ) ) {
+		wp_send_json_error( array( 'message' => '未开启自动更新，已禁止执行文件替换。' ), 400 );
+	}
+
+	$summary = wpsanyueimg_get_update_summary();
+	if ( '' === (string) ( $summary['new_version'] ?? '' ) || '' === (string) ( $summary['download_url'] ?? '' ) ) {
+		wp_send_json_error( array( 'message' => '更新信息获取失败，请检查更新源地址或网络。' ), 500 );
+	}
+	if ( empty( $summary['has_update'] ) ) {
+		wp_send_json_error( array( 'message' => '当前已是最新版本，无需更新。' ), 400 );
+	}
+
+	try {
+		$result = wpsanyueimg_perform_safe_update(
+			array(
+				'download_url' => $summary['download_url'],
+			)
+		);
+		wpsanyueimg_log(
+			'plugin_safe_update_success',
+			array(
+				'summary' => $summary,
+				'result' => $result,
+			)
+		);
+		wp_send_json_success(
+			array(
+				'message' => '更新完成。功能仍处于测试阶段，建议你手动下载压缩包再次核对。',
+				'result' => $result,
+			)
+		);
+	} catch ( Throwable $e ) {
+		wpsanyueimg_log(
+			'plugin_safe_update_failed',
+			array(
+				'error' => $e->getMessage(),
+				'summary' => $summary,
+			)
+		);
+		wp_send_json_error( array( 'message' => '更新失败：' . $e->getMessage() ), 500 );
+	}
+}
+
 function wpsanyueimg_is_log_enabled() {
 	$options = wpsanyueimg_get_options();
 	if ( is_array( $options ) && array_key_exists( 'enable_log', $options ) ) {

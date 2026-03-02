@@ -29,6 +29,7 @@ function wpsanyueimg_setting_page() {
 	}
 	$notice_text = '';
 	$need_frontend_retry = false;
+	$manual_check_requested = false;
 	if ( ! empty( $_POST ) && isset( $_POST['type'] ) && wp_verify_nonce( $_REQUEST['_wpnonce'] ?? '', -1 ) ) {
 		if ( $_POST['type'] === 'imgbed_info_set' ) {
 
@@ -52,6 +53,7 @@ function wpsanyueimg_setting_page() {
             update_option('wpsanyueimg_options', $wpsanyueimg_options);
 			delete_option('upload_url_path');
 			if ( isset( $_POST['check_update_now'] ) ) {
+				$manual_check_requested = true;
 				$check_ok = wpsanyueimg_force_check_update_now();
 				if ( $check_ok ) {
 					$notice_text = '设置已保存，且已触发一次更新检查。';
@@ -191,6 +193,168 @@ function wpsanyueimg_setting_page() {
 		};
 		autoUpdateCheckbox.addEventListener('change', toggleWarning);
 		toggleWarning();
+	}
+
+	var ajaxUrl = <?php echo wp_json_encode( admin_url( 'admin-ajax.php' ) ); ?>;
+	var nonce = <?php echo wp_json_encode( wp_create_nonce( 'wpsanyueimg_update_nonce' ) ); ?>;
+	var autoUpdateEnabled = <?php echo ! empty( $wpsanyueimg_options['enable_auto_update'] ) ? 'true' : 'false'; ?>;
+	var manualCheckRequested = <?php echo $manual_check_requested ? 'true' : 'false'; ?>;
+
+	function createPopup(options) {
+		var popup = document.createElement('div');
+		popup.style.position = 'fixed';
+		popup.style.top = '20px';
+		popup.style.right = '20px';
+		popup.style.zIndex = '99999';
+		popup.style.maxWidth = '420px';
+		popup.style.background = '#fff';
+		popup.style.border = '1px solid #ccd0d4';
+		popup.style.boxShadow = '0 2px 8px rgba(0,0,0,.12)';
+		popup.style.padding = '14px';
+		popup.style.borderRadius = '6px';
+
+		var title = document.createElement('div');
+		title.style.fontWeight = '600';
+		title.style.marginBottom = '8px';
+		title.textContent = options.title || '更新提示';
+		popup.appendChild(title);
+
+		var content = document.createElement('div');
+		content.style.fontSize = '13px';
+		content.style.lineHeight = '1.6';
+		content.innerHTML = options.html || '';
+		popup.appendChild(content);
+
+		var actions = document.createElement('div');
+		actions.style.marginTop = '12px';
+		actions.style.display = 'flex';
+		actions.style.gap = '8px';
+
+		if (options.primaryText && typeof options.onPrimary === 'function') {
+			var primary = document.createElement('button');
+			primary.type = 'button';
+			primary.className = 'button button-primary';
+			primary.textContent = options.primaryText;
+			primary.addEventListener('click', function(){ options.onPrimary(popup, primary); });
+			actions.appendChild(primary);
+		}
+
+		var close = document.createElement('button');
+		close.type = 'button';
+		close.className = 'button';
+		close.textContent = options.closeText || '关闭';
+		close.addEventListener('click', function(){
+			if (popup && popup.parentNode) {
+				popup.parentNode.removeChild(popup);
+			}
+		});
+		actions.appendChild(close);
+
+		popup.appendChild(actions);
+		document.body.appendChild(popup);
+		return popup;
+	}
+
+	function postAjax(actionName, timeoutMs, extraData) {
+		var controller = window.AbortController ? new AbortController() : null;
+		var timer = null;
+		if (controller && timeoutMs > 0) {
+			timer = setTimeout(function(){ controller.abort(); }, timeoutMs);
+		}
+
+		var body = new URLSearchParams();
+		body.append('action', actionName);
+		body.append('nonce', nonce);
+		if (extraData && typeof extraData === 'object') {
+			Object.keys(extraData).forEach(function(key){
+				body.append(key, String(extraData[key]));
+			});
+		}
+
+		return fetch(ajaxUrl, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
+			body: body.toString(),
+			signal: controller ? controller.signal : undefined
+		}).then(function(resp){
+			if (timer) {
+				clearTimeout(timer);
+			}
+			return resp.json();
+		});
+	}
+
+	function showLatestPopup(currentVersion) {
+		createPopup({
+			title: '更新检查',
+			html: '当前是最新版本：<strong>' + String(currentVersion || '-') + '</strong>'
+		});
+	}
+
+	function showUpdatePopup(data, allowApply) {
+		var changelog = data.changelog ? String(data.changelog).replace(/</g, '&lt;').replace(/>/g, '&gt;') : '暂无更新说明';
+		var releaseUrl = data.github_release_url || data.homepage || 'https://github.com/imysen/wp-sanyueqicfimg/releases';
+		var askLine = allowApply ? '是否立即更新？' : '自动更新未开启，当前仅展示版本信息。';
+		var html = '' +
+			'<div>检测到新版本：<strong>' + String(data.current_version || '-') + '</strong> → <strong>' + String(data.new_version || '-') + '</strong></div>' +
+			'<div style="margin-top:8px;"><strong>更新内容：</strong><br><pre style="white-space:pre-wrap;max-height:120px;overflow:auto;margin:6px 0 0;">' + changelog + '</pre></div>' +
+			'<div style="margin-top:8px;">GitHub发布地址：<a href="' + String(releaseUrl) + '" target="_blank" rel="noopener noreferrer">' + String(releaseUrl) + '</a></div>' +
+			'<div style="margin-top:8px;color:#d63638;">提示：目前更新功能处于测试阶段，建议手动下载压缩包更新。</div>' +
+			'<div style="margin-top:8px;">' + askLine + '</div>';
+
+		createPopup({
+			title: '存在新版本',
+			html: html,
+			primaryText: allowApply ? '是，立即更新' : '',
+			closeText: '否，稍后再说',
+			onPrimary: function(popup, button) {
+				var ok = window.confirm('请不要动当前插件目录。系统将创建更新目录，对比差异后替换到生产目录。继续吗？');
+				if (!ok) {
+					return;
+				}
+
+				button.disabled = true;
+				button.textContent = '更新中，请勿操作...';
+
+				postAjax('wpsanyueimg_apply_update', 61000)
+					.then(function(result){
+						if (!result || !result.success) {
+							throw new Error(result && result.data && result.data.message ? result.data.message : '更新失败');
+						}
+						var data = result.data || {};
+						var info = data.result || {};
+						var msg = (data.message || '更新完成') + '（替换文件：' + String(info.replaced_count || 0) + '，耗时：' + String(info.time_cost || '-') + '秒）';
+						popup.querySelector('div:nth-child(2)').innerHTML = '<div style="color:#00a32a;">' + msg + '</div>';
+						button.remove();
+					})
+					.catch(function(error){
+						popup.querySelector('div:nth-child(2)').innerHTML = '<div style="color:#d63638;">更新失败：' + String(error.message || error) + '</div>';
+						button.disabled = false;
+						button.textContent = '是，立即更新';
+					});
+			}
+		});
+	}
+
+	if (autoUpdateEnabled || manualCheckRequested) {
+		postAjax('wpsanyueimg_check_update_popup', 15000, { manual: manualCheckRequested ? '1' : '0' })
+			.then(function(result){
+				if (!result || !result.success) {
+					throw new Error(result && result.data && result.data.message ? result.data.message : '更新检查失败');
+				}
+				var data = result.data || {};
+				if (data.has_update) {
+					showUpdatePopup(data, autoUpdateEnabled);
+				} else {
+					showLatestPopup(data.current_version);
+				}
+			})
+			.catch(function(error){
+				createPopup({
+					title: '更新检查失败',
+					html: '<div style="color:#d63638;">' + String(error.message || error) + '</div><div style="margin-top:8px;">目前更新功能处于测试阶段，建议手动下载压缩包更新。</div>'
+				});
+			});
 	}
 
 	var needRetry = <?php echo $need_frontend_retry ? 'true' : 'false'; ?>;
