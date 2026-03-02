@@ -38,6 +38,11 @@ add_filter('wp_unique_filename', 'wpsanyueimg_unique_filename');
 add_action('delete_attachment', 'wpsanyueimg_delete_remote_attachment');
 add_filter('wp_get_attachment_url', 'wpsanyueimg_filter_attachment_url', 10, 2);
 
+# 插件自动更新（读取自定义更新源）
+add_filter( 'pre_set_site_transient_update_plugins', 'wpsanyueimg_check_plugin_update' );
+add_filter( 'plugins_api', 'wpsanyueimg_plugins_api', 10, 3 );
+add_filter( 'auto_update_plugin', 'wpsanyueimg_auto_update_plugin', 10, 2 );
+
 # 添加插件设置菜单
 add_action('admin_menu', 'wpsanyueimg_add_setting_page');
 add_filter('plugin_action_links', 'wpsanyueimg_plugin_action_links', 10, 2);

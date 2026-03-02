@@ -6,6 +6,8 @@ define( 'WPSANYUEIMG_VERSION', 4.1 );  // 插件数据版本
 define( 'WPSANYUEIMG_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );  // 插件路径
 define( 'WPSANYUEIMG_BASENAME', plugin_basename(__FILE__));
 define( 'WPSANYUEIMG_BASEFOLDER', plugin_basename(dirname(__FILE__)));
+define( 'WPSANYUEIMG_PLUGIN_FILE', plugin_basename( WPSANYUEIMG_PLUGIN_DIR . 'index.php' ) );
+define( 'WPSANYUEIMG_DEFAULT_UPDATE_SOURCE_URL', 'https://github-updateapi.112601.xyz/wp-sanyueqicfimg/update.json' );
 
 function wpsanyueimg_get_options() {
 	$options = get_option('wpsanyueimg_options');
@@ -13,6 +15,211 @@ function wpsanyueimg_get_options() {
 		return $options;
 	}
 	return array();
+}
+
+function wpsanyueimg_get_plugin_version() {
+	if ( ! function_exists( 'get_file_data' ) ) {
+		require_once ABSPATH . 'wp-admin/includes/plugin.php';
+	}
+	$data = get_file_data( WPSANYUEIMG_PLUGIN_DIR . 'index.php', array( 'Version' => 'Version' ), 'plugin' );
+	$version = isset( $data['Version'] ) ? trim( (string) $data['Version'] ) : '';
+	return '' !== $version ? $version : '0.0.0';
+}
+
+function wpsanyueimg_normalize_version( $version ) {
+	$version = trim( (string) $version );
+	$version = preg_replace( '/^v/i', '', $version );
+	return $version;
+}
+
+function wpsanyueimg_get_update_source_url() {
+	$options = wpsanyueimg_get_options();
+	$url = is_array( $options ) ? (string) ( $options['update_source_url'] ?? '' ) : '';
+	if ( '' === trim( $url ) ) {
+		$url = WPSANYUEIMG_DEFAULT_UPDATE_SOURCE_URL;
+	}
+	$url = esc_url_raw( trim( $url ) );
+	if ( '' === $url ) {
+		return '';
+	}
+	if ( 0 !== strpos( $url, 'https://' ) ) {
+		return '';
+	}
+	return $url;
+}
+
+function wpsanyueimg_validate_update_meta( $meta ) {
+	if ( ! is_array( $meta ) ) {
+		return array();
+	}
+
+	$new_version = wpsanyueimg_normalize_version( $meta['new_version'] ?? '' );
+	$download_url = esc_url_raw( (string) ( $meta['download_url'] ?? '' ) );
+	if ( '' === $new_version || '' === $download_url ) {
+		return array();
+	}
+
+	return array(
+		'plugin'       => sanitize_text_field( (string) ( $meta['plugin'] ?? WPSANYUEIMG_PLUGIN_FILE ) ),
+		'new_version'  => $new_version,
+		'download_url' => $download_url,
+		'requires'     => sanitize_text_field( (string) ( $meta['requires'] ?? '' ) ),
+		'requires_php' => sanitize_text_field( (string) ( $meta['requires_php'] ?? '' ) ),
+		'tested'       => sanitize_text_field( (string) ( $meta['tested'] ?? '' ) ),
+		'changelog'    => wp_kses_post( (string) ( $meta['changelog'] ?? '' ) ),
+		'homepage'     => esc_url_raw( (string) ( $meta['homepage'] ?? '' ) ),
+		'last_updated' => sanitize_text_field( (string) ( $meta['last_updated'] ?? '' ) ),
+	);
+}
+
+function wpsanyueimg_fetch_update_meta( $force = false ) {
+	$cache_key = 'wpsanyueimg_update_meta';
+	if ( ! $force ) {
+		$cached = get_site_transient( $cache_key );
+		if ( is_array( $cached ) ) {
+			return $cached;
+		}
+	}
+
+	$source_url = wpsanyueimg_get_update_source_url();
+	if ( '' === $source_url ) {
+		return array();
+	}
+
+	$response = wp_remote_get(
+		$source_url,
+		array(
+			'timeout' => 15,
+			'headers' => array(
+				'Accept' => 'application/json',
+			),
+		)
+	);
+
+	if ( is_wp_error( $response ) ) {
+		wpsanyueimg_log(
+			'update_meta_fetch_error',
+			array(
+				'url' => $source_url,
+				'error' => $response->get_error_message(),
+			)
+		);
+		return array();
+	}
+
+	$status = (int) wp_remote_retrieve_response_code( $response );
+	$body = (string) wp_remote_retrieve_body( $response );
+	if ( $status < 200 || $status >= 300 ) {
+		wpsanyueimg_log(
+			'update_meta_fetch_http_error',
+			array(
+				'url' => $source_url,
+				'status' => $status,
+				'body' => mb_substr( $body, 0, 300 ),
+			)
+		);
+		return array();
+	}
+
+	$decoded = json_decode( $body, true );
+	$meta = wpsanyueimg_validate_update_meta( $decoded );
+	if ( empty( $meta ) ) {
+		wpsanyueimg_log(
+			'update_meta_invalid',
+			array(
+				'url' => $source_url,
+				'body' => mb_substr( $body, 0, 300 ),
+			)
+		);
+		return array();
+	}
+
+	set_site_transient( $cache_key, $meta, 6 * HOUR_IN_SECONDS );
+	return $meta;
+}
+
+function wpsanyueimg_check_plugin_update( $transient ) {
+	if ( ! is_object( $transient ) ) {
+		$transient = new stdClass();
+	}
+
+	$meta = wpsanyueimg_fetch_update_meta( false );
+	if ( empty( $meta ) ) {
+		return $transient;
+	}
+
+	$current_version = wpsanyueimg_normalize_version( wpsanyueimg_get_plugin_version() );
+	$remote_version = wpsanyueimg_normalize_version( $meta['new_version'] ?? '' );
+	if ( '' === $remote_version || version_compare( $remote_version, $current_version, '<=' ) ) {
+		return $transient;
+	}
+
+	$transient->response[ WPSANYUEIMG_PLUGIN_FILE ] = (object) array(
+		'id'           => WPSANYUEIMG_PLUGIN_FILE,
+		'slug'         => WPSANYUEIMG_BASEFOLDER,
+		'plugin'       => WPSANYUEIMG_PLUGIN_FILE,
+		'new_version'  => $remote_version,
+		'url'          => ! empty( $meta['homepage'] ) ? $meta['homepage'] : 'https://github.com/imysen/wp-sanyueqicfimg',
+		'package'      => $meta['download_url'],
+		'tested'       => $meta['tested'] ?? '',
+		'requires'     => $meta['requires'] ?? '',
+		'requires_php' => $meta['requires_php'] ?? '',
+	);
+
+	return $transient;
+}
+
+function wpsanyueimg_plugins_api( $result, $action, $args ) {
+	if ( 'plugin_information' !== $action || ! isset( $args->slug ) || WPSANYUEIMG_BASEFOLDER !== $args->slug ) {
+		return $result;
+	}
+
+	$meta = wpsanyueimg_fetch_update_meta( false );
+	if ( empty( $meta ) ) {
+		return $result;
+	}
+
+	$sections = array(
+		'description' => 'CloudFlare ImgBed 媒体存储插件。',
+		'changelog'   => ! empty( $meta['changelog'] ) ? $meta['changelog'] : '暂无更新日志。',
+	);
+
+	return (object) array(
+		'name'          => 'WP-SanyueqiCfimg',
+		'slug'          => WPSANYUEIMG_BASEFOLDER,
+		'version'       => $meta['new_version'],
+		'author'        => '<a href="https://blog.imysen.com">邹云森森</a>',
+		'homepage'      => ! empty( $meta['homepage'] ) ? $meta['homepage'] : 'https://github.com/imysen/wp-sanyueqicfimg',
+		'download_link' => $meta['download_url'],
+		'requires'      => $meta['requires'] ?? '',
+		'requires_php'  => $meta['requires_php'] ?? '',
+		'tested'        => $meta['tested'] ?? '',
+		'last_updated'  => $meta['last_updated'] ?? '',
+		'sections'      => $sections,
+	);
+}
+
+function wpsanyueimg_auto_update_plugin( $update, $item ) {
+	if ( ! is_object( $item ) || empty( $item->plugin ) || WPSANYUEIMG_PLUGIN_FILE !== $item->plugin ) {
+		return $update;
+	}
+
+	$options = wpsanyueimg_get_options();
+	if ( is_array( $options ) && ! empty( $options['enable_auto_update'] ) ) {
+		return true;
+	}
+
+	return $update;
+}
+
+function wpsanyueimg_force_check_update_now() {
+	delete_site_transient( 'wpsanyueimg_update_meta' );
+	delete_site_transient( 'update_plugins' );
+	$meta = wpsanyueimg_fetch_update_meta( true );
+	if ( function_exists( 'wp_update_plugins' ) ) {
+		wp_update_plugins();
+	}
+	return ! empty( $meta );
 }
 
 function wpsanyueimg_is_log_enabled() {
@@ -89,6 +296,8 @@ function wpsanyueimg_set_options() {
 		'imgbed_upload_folder' => "",
 		'imgbed_auto_retry' => true,
 		'imgbed_server_compress' => true,
+		'update_source_url' => WPSANYUEIMG_DEFAULT_UPDATE_SOURCE_URL,
+		'enable_auto_update' => true,
 		'enable_log' => true,
 	    'no_local_file' => false,  # 不在本地保留备份
         'opt' => array(

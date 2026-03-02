@@ -20,11 +20,15 @@ function wpsanyueimg_setting_page() {
 			'imgbed_upload_folder' => '',
 			'imgbed_auto_retry' => true,
 			'imgbed_server_compress' => true,
+			'update_source_url' => WPSANYUEIMG_DEFAULT_UPDATE_SOURCE_URL,
+			'enable_auto_update' => true,
 			'enable_log' => true,
 			'no_local_file' => false,
 			'opt'           => array( 'auto_rename' => false, 'thumbsize' => null ),
 		);
 	}
+	$notice_text = '';
+	$need_frontend_retry = false;
 	if ( ! empty( $_POST ) && isset( $_POST['type'] ) && wp_verify_nonce( $_REQUEST['_wpnonce'] ?? '', -1 ) ) {
 		if ( $_POST['type'] === 'imgbed_info_set' ) {
 
@@ -38,6 +42,8 @@ function wpsanyueimg_setting_page() {
 	            $wpsanyueimg_options['imgbed_upload_folder'] = isset($_POST['imgbed_upload_folder']) ? sanitize_text_field(trim(stripslashes($_POST['imgbed_upload_folder']))) : '';
 	            $wpsanyueimg_options['imgbed_auto_retry'] = isset($_POST['imgbed_auto_retry']);
 	            $wpsanyueimg_options['imgbed_server_compress'] = isset($_POST['imgbed_server_compress']);
+	            $wpsanyueimg_options['update_source_url'] = isset($_POST['update_source_url']) ? esc_url_raw(trim(stripslashes($_POST['update_source_url']))) : '';
+	            $wpsanyueimg_options['enable_auto_update'] = isset($_POST['enable_auto_update']);
 	            $wpsanyueimg_options['enable_log'] = isset($_POST['enable_log']);
 			$wpsanyueimg_options['opt']['auto_rename'] = isset($_POST['auto_rename']);
 
@@ -45,9 +51,20 @@ function wpsanyueimg_setting_page() {
             // 不管结果变没变，有提交则直接以提交的数据 更新wpsanyueimg_options
             update_option('wpsanyueimg_options', $wpsanyueimg_options);
 			delete_option('upload_url_path');
+			if ( isset( $_POST['check_update_now'] ) ) {
+				$check_ok = wpsanyueimg_force_check_update_now();
+				if ( $check_ok ) {
+					$notice_text = '设置已保存，且已触发一次更新检查。';
+				} else {
+					$notice_text = '设置已保存，但后端检查更新失败，正在使用前端重试一次。';
+					$need_frontend_retry = true;
+				}
+			} else {
+				$notice_text = '设置已保存。';
+			}
 
             ?>
-            <div class="notice notice-success settings-error is-dismissible"><p><strong>设置已保存。</strong></p></div>
+            <div class="notice notice-success settings-error is-dismissible"><p><strong><?php echo esc_html( $notice_text ); ?></strong></p></div>
 
             <?php }
 	}
@@ -108,6 +125,13 @@ function wpsanyueimg_setting_page() {
 				</td>
 			</tr>
 			<tr>
+				<th scope="row"><label for="update_source_url">更新源地址</label></th>
+				<td>
+					<input name="update_source_url" type="url" id="update_source_url" value="<?php echo esc_attr( $wpsanyueimg_options['update_source_url'] ?? '' ); ?>" class="regular-text" placeholder="https://github-updateapi.112601.xyz/wp-sanyueqicfimg/update.json" />
+					<p class="description">建议填写 Worker 返回 update.json 的 HTTPS 地址。</p>
+				</td>
+			</tr>
+			<tr>
 				<th scope="row">选项</th>
 				<td>
 					<fieldset>
@@ -125,6 +149,12 @@ function wpsanyueimg_setting_page() {
 							<input name="enable_log" type="checkbox" id="enable_log" value="1" <?php checked( ! isset( $wpsanyueimg_options['enable_log'] ) || ! empty( $wpsanyueimg_options['enable_log'] ) ); ?> />
 							调试日志（写入 uploads/wpsanyueqicfimg.log）
 						</label>
+						<br>
+						<label for="enable_auto_update">
+							<input name="enable_auto_update" type="checkbox" id="enable_auto_update" value="1" <?php checked( ! empty( $wpsanyueimg_options['enable_auto_update'] ) ); ?> />
+							启用插件自动更新
+						</label>
+						<p id="auto-update-warning" class="description" style="color:#d63638;<?php echo ! empty( $wpsanyueimg_options['enable_auto_update'] ) ? 'display:none;' : ''; ?>">强烈建议开启自动更新，及时获取安全修复与兼容性更新。</p>
 						<br>
 						<label for="auto_rename">
 							<input name="auto_rename" type="checkbox" id="auto_rename" value="1" <?php checked( ! empty( $wpsanyueimg_options['opt']['auto_rename'] ) ); ?> />
@@ -148,8 +178,55 @@ function wpsanyueimg_setting_page() {
 
 		<input type="hidden" name="type" value="imgbed_info_set">
 		<?php submit_button( '保存设置' ); ?>
+		<?php submit_button( '保存并立即检查更新', 'secondary', 'check_update_now', false ); ?>
 	</form>
 </div>
+<script>
+(function(){
+	var autoUpdateCheckbox = document.getElementById('enable_auto_update');
+	var warningLine = document.getElementById('auto-update-warning');
+	if (autoUpdateCheckbox && warningLine) {
+		var toggleWarning = function() {
+			warningLine.style.display = autoUpdateCheckbox.checked ? 'none' : 'block';
+		};
+		autoUpdateCheckbox.addEventListener('change', toggleWarning);
+		toggleWarning();
+	}
+
+	var needRetry = <?php echo $need_frontend_retry ? 'true' : 'false'; ?>;
+	if (!needRetry) {
+		return;
+	}
+
+	var retryUrl = <?php echo wp_json_encode( wpsanyueimg_get_update_source_url() ); ?>;
+	if (!retryUrl) {
+		return;
+	}
+
+	fetch(retryUrl, { cache: 'no-store' })
+		.then(function(resp){
+			if (!resp.ok) {
+				throw new Error('HTTP ' + resp.status);
+			}
+			return resp.json();
+		})
+		.then(function(data){
+			if (!data || !data.new_version || !data.download_url) {
+				throw new Error('invalid payload');
+			}
+			var ok = document.createElement('div');
+			ok.className = 'notice notice-success is-dismissible';
+			ok.innerHTML = '<p><strong>前端重试更新接口成功：' + String(data.new_version) + '。请点击“保存并立即检查更新”完成后端刷新。</strong></p>';
+			document.querySelector('.wrap').insertBefore(ok, document.querySelector('.wrap').children[1]);
+		})
+		.catch(function(error){
+			var fail = document.createElement('div');
+			fail.className = 'notice notice-warning is-dismissible';
+			fail.innerHTML = '<p><strong>前端重试也失败：' + String(error.message || error) + '。请稍后重试或检查 Worker Token。</strong></p>';
+			document.querySelector('.wrap').insertBefore(fail, document.querySelector('.wrap').children[1]);
+		});
+})();
+</script>
 <?php
 }
 ?>
