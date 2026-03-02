@@ -20,6 +20,7 @@ function wpsanyueimg_setting_page() {
 			'imgbed_upload_folder' => '',
 			'imgbed_auto_retry' => true,
 			'imgbed_server_compress' => true,
+			'enable_log' => true,
 			'no_local_file' => false,
 			'opt'           => array( 'auto_rename' => false, 'thumbsize' => null ),
 		);
@@ -37,6 +38,7 @@ function wpsanyueimg_setting_page() {
 	            $wpsanyueimg_options['imgbed_upload_folder'] = isset($_POST['imgbed_upload_folder']) ? sanitize_text_field(trim(stripslashes($_POST['imgbed_upload_folder']))) : '';
 	            $wpsanyueimg_options['imgbed_auto_retry'] = isset($_POST['imgbed_auto_retry']);
 	            $wpsanyueimg_options['imgbed_server_compress'] = isset($_POST['imgbed_server_compress']);
+	            $wpsanyueimg_options['enable_log'] = isset($_POST['enable_log']);
 			$wpsanyueimg_options['opt']['auto_rename'] = isset($_POST['auto_rename']);
 
 			$wpsanyueimg_options = wpsanyueimg_set_thumbsize($wpsanyueimg_options, isset($_POST['disable_thumb']));
@@ -171,6 +173,17 @@ function wpsanyueimg_setting_page() {
 								</div>
 								<div class="layui-form-mid layui-word-aux">
 									默认压缩（仅针对Telegram渠道的图片文件）
+								</div>
+							</div>
+							<div class="layui-form-item">
+								<label class="layui-form-label">调试日志</label>
+								<div class="layui-input-inline" style="width:60px;">
+									<input type="checkbox" name="enable_log"  title="设置"
+									<?php if ( ! isset($wpsanyueimg_options['enable_log']) || ! empty( $wpsanyueimg_options['enable_log'] ) ) { echo 'checked="TRUE"'; } ?>
+									>
+								</div>
+								<div class="layui-form-mid layui-word-aux">
+									记录上传/删除请求结果到 uploads/wpsanyueqicfimg.log（建议排障时开启）
 								</div>
 							</div>
 							<div class="layui-form-item">

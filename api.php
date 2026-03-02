@@ -102,31 +102,64 @@ class ImgBedApi {
 
 	public function delete( $keys ) {
 		if ( ! is_array( $keys ) || empty( $keys ) ) {
-			return;
+			return array();
 		}
+		$results = array();
 		foreach ( $keys as $key ) {
 			$path = ltrim( (string) $key, '/' );
 			if ( '' === $path ) {
 				continue;
 			}
 			$encoded_path = $this->encode_path_for_url( $path );
-			$url = $this->build_url( '/api/manage/delete/' . $encoded_path );
-			$response = wp_remote_request(
-				$url,
-				array(
-					'method'  => 'DELETE',
-					'headers' => $this->build_headers( true ),
-					'timeout' => 30,
-				)
+
+			$attempt_urls = array(
+				$this->build_url( '/api/manage/delete/' . $encoded_path ),
+				$this->build_url( '/manage/delete/' . $encoded_path ),
 			);
-			if ( is_wp_error( $response ) ) {
-				continue;
+
+			$item_result = array(
+				'key'      => $path,
+				'success'  => false,
+				'status'   => 0,
+				'url'      => '',
+				'error'    => '',
+				'response' => '',
+			);
+
+			foreach ( $attempt_urls as $url ) {
+				$item_result['url'] = $url;
+				$response = wp_remote_request(
+					$url,
+					array(
+						'method'  => 'DELETE',
+						'headers' => $this->build_headers( true ),
+						'timeout' => 30,
+					)
+				);
+
+				if ( is_wp_error( $response ) ) {
+					$item_result['error'] = $response->get_error_message();
+					continue;
+				}
+
+				$status_code = (int) wp_remote_retrieve_response_code( $response );
+				$body = (string) wp_remote_retrieve_body( $response );
+				$item_result['status'] = $status_code;
+				$item_result['response'] = mb_substr( $body, 0, 300 );
+
+				if ( $status_code >= 200 && $status_code < 300 ) {
+					$item_result['success'] = true;
+					$item_result['error'] = '';
+					break;
+				}
+
+				$item_result['error'] = 'HTTP ' . $status_code;
 			}
-			$status_code = (int) wp_remote_retrieve_response_code( $response );
-			if ( $status_code < 200 || $status_code >= 300 ) {
-				continue;
-			}
+
+			$results[] = $item_result;
 		}
+
+		return $results;
 	}
 
 	public function has_exist( $key ) {

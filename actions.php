@@ -15,6 +15,67 @@ function wpsanyueimg_get_options() {
 	return array();
 }
 
+function wpsanyueimg_is_log_enabled() {
+	$options = wpsanyueimg_get_options();
+	if ( is_array( $options ) && array_key_exists( 'enable_log', $options ) ) {
+		return ! empty( $options['enable_log'] );
+	}
+	return true;
+}
+
+function wpsanyueimg_log( $message, $context = array() ) {
+	if ( ! wpsanyueimg_is_log_enabled() ) {
+		return;
+	}
+
+	$upload_dir = wp_upload_dir();
+	$base_dir = is_array( $upload_dir ) && ! empty( $upload_dir['basedir'] ) ? $upload_dir['basedir'] : WP_CONTENT_DIR;
+	$log_file = trailingslashit( $base_dir ) . 'wpsanyueqicfimg.log';
+
+	$line = '[' . current_time( 'mysql' ) . '] ' . (string) $message;
+	if ( ! empty( $context ) ) {
+		$context_json = wp_json_encode( $context, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES );
+		if ( is_string( $context_json ) && '' !== $context_json ) {
+			$line .= ' | ' . $context_json;
+		}
+	}
+
+	error_log( $line . PHP_EOL, 3, $log_file );
+}
+
+function wpsanyueimg_build_delete_candidates( $keys, $options = array() ) {
+	if ( ! is_array( $keys ) ) {
+		return array();
+	}
+
+	$upload_folder = trim( (string) ( $options['imgbed_upload_folder'] ?? '' ), '/' );
+	$candidates = array();
+
+	foreach ( $keys as $key ) {
+		$key = ltrim( (string) $key, '/' );
+		if ( '' === $key ) {
+			continue;
+		}
+		$candidates[] = $key;
+
+		if ( '' === $upload_folder ) {
+			continue;
+		}
+
+		$prefix = $upload_folder . '/';
+		if ( 0 === strpos( $key, $prefix ) ) {
+			$stripped_key = ltrim( substr( $key, strlen( $prefix ) ), '/' );
+			if ( '' !== $stripped_key ) {
+				$candidates[] = $stripped_key;
+			}
+		} else {
+			$candidates[] = $prefix . $key;
+		}
+	}
+
+	return array_values( array_unique( array_filter( $candidates ) ) );
+}
+
 // 初始化选项
 function wpsanyueimg_set_options() {
     $options = array(
@@ -28,6 +89,7 @@ function wpsanyueimg_set_options() {
 		'imgbed_upload_folder' => "",
 		'imgbed_auto_retry' => true,
 		'imgbed_server_compress' => true,
+		'enable_log' => true,
 	    'no_local_file' => false,  # 不在本地保留备份
         'opt' => array(
             'auto_rename' => false,
@@ -258,6 +320,11 @@ function wpsanyueimg_save_remote_mapping( $attachment_id, $local_key, $upload_re
  * @param $post_id
  */
 function wpsanyueimg_delete_remote_attachment($post_id) {
+	$post_id = (int) $post_id;
+	if ( $post_id <= 0 ) {
+		return;
+	}
+
 	// 获取要删除的对象Key的数组
 	$deleteObjects = array();
 	$meta = wp_get_attachment_metadata( $post_id );
@@ -301,16 +368,60 @@ function wpsanyueimg_delete_remote_attachment($post_id) {
 	}
 
 	$deleteObjects = array_values( array_unique( array_filter( $deleteObjects ) ) );
+	wpsanyueimg_log(
+		'remote_delete_prepare',
+		array(
+			'post_id' => $post_id,
+			'delete_objects' => $deleteObjects,
+			'remote_main_url' => $remote_main_url,
+		)
+	);
 
     if ( ! empty( $deleteObjects ) ) {
         $wpsanyueimg_options = wpsanyueimg_get_options();
         if ( is_array( $wpsanyueimg_options ) && ! empty( $wpsanyueimg_options ) ) {
+			$delete_candidates = wpsanyueimg_build_delete_candidates( $deleteObjects, $wpsanyueimg_options );
+			wpsanyueimg_log(
+				'remote_delete_candidates',
+				array(
+					'post_id' => $post_id,
+					'candidates' => $delete_candidates,
+				)
+			);
 			try {
 				$imgbed = new ImgBedApi( $wpsanyueimg_options );
-				$imgbed->delete($deleteObjects);
+				$delete_results = $imgbed->delete( $delete_candidates );
+				wpsanyueimg_log(
+					'remote_delete_results',
+					array(
+						'post_id' => $post_id,
+						'results' => $delete_results,
+					)
+				);
 			} catch ( Exception $e ) {
+				wpsanyueimg_log(
+					'remote_delete_exception',
+					array(
+						'post_id' => $post_id,
+						'message' => $e->getMessage(),
+					)
+				);
 			}
+        } else {
+			wpsanyueimg_log(
+				'remote_delete_skip_invalid_options',
+				array(
+					'post_id' => $post_id,
+				)
+			);
         }
+    } else {
+		wpsanyueimg_log(
+			'remote_delete_skip_empty_keys',
+			array(
+				'post_id' => $post_id,
+			)
+		);
     }
 }
 
