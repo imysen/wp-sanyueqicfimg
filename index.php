@@ -37,6 +37,9 @@ add_filter('wp_unique_filename', 'wpsanyueimg_unique_filename');
 # 删除文件时触发删除远端文件，该删除会默认删除缩略图
 add_action('delete_attachment', 'wpsanyueimg_delete_remote_attachment');
 add_filter('wp_get_attachment_url', 'wpsanyueimg_filter_attachment_url', 10, 2);
+add_filter( 'image_downsize', 'wpsanyueimg_filter_image_downsize', 10, 3 );
+add_filter( 'wp_calculate_image_srcset_meta', 'wpsanyueimg_filter_calculate_image_srcset_meta', 10, 4 );
+add_filter( 'wp_calculate_image_srcset', 'wpsanyueimg_filter_calculate_image_srcset', 10, 5 );
 
 # 插件自动更新（读取自定义更新源）
 add_filter( 'pre_set_site_transient_update_plugins', 'wpsanyueimg_check_plugin_update' );
