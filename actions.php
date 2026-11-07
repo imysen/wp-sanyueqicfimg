@@ -729,6 +729,177 @@ function wpsanyueimg_remote_key_from_url( $remote_url ) {
 	return ltrim( (string) $path, '/' );
 }
 
+function wpsanyueimg_normalize_attachment_file_key( $file_key ) {
+	return ltrim( str_replace( '\\', '/', (string) $file_key ), '/' );
+}
+
+function wpsanyueimg_attachment_file_key( $main_file, $relative_file ) {
+	$main_file = wpsanyueimg_normalize_attachment_file_key( $main_file );
+	$relative_file = wpsanyueimg_normalize_attachment_file_key( $relative_file );
+	$directory = dirname( $main_file );
+
+	if ( '.' === $directory || '' === $directory ) {
+		return $relative_file;
+	}
+
+	return $directory . '/' . $relative_file;
+}
+
+function wpsanyueimg_remote_url_from_key( $remote_key, $base_url = null ) {
+	$remote_key = wpsanyueimg_normalize_attachment_file_key( $remote_key );
+	if ( null === $base_url ) {
+		$wpsanyueimg_options = wpsanyueimg_get_options();
+		$base_url = is_array( $wpsanyueimg_options ) ? ( $wpsanyueimg_options['imgbed_base_url'] ?? '' ) : '';
+	}
+	$base_url = rtrim( esc_url_raw( (string) $base_url ), '/' );
+
+	if ( '' === $remote_key || '' === $base_url ) {
+		return '';
+	}
+
+	return wpsanyueimg_normalize_remote_url( '/file/' . $remote_key, $base_url );
+}
+
+function wpsanyueimg_remote_key_for_local_file( $remote_map, $local_key ) {
+	$local_key = wpsanyueimg_normalize_attachment_file_key( $local_key );
+	if ( ! is_array( $remote_map ) || '' === $local_key || empty( $remote_map[ $local_key ] ) || ! is_string( $remote_map[ $local_key ] ) ) {
+		return '';
+	}
+
+	return wpsanyueimg_normalize_attachment_file_key( $remote_map[ $local_key ] );
+}
+
+function wpsanyueimg_filter_image_downsize( $downsize, $attachment_id, $size ) {
+	if ( $downsize || ! wp_attachment_is_image( (int) $attachment_id ) ) {
+		return $downsize;
+	}
+
+	$metadata = wp_get_attachment_metadata( (int) $attachment_id );
+	if ( ! is_array( $metadata ) || empty( $metadata['file'] ) ) {
+		return $downsize;
+	}
+
+	$intermediate = image_get_intermediate_size( (int) $attachment_id, $size );
+	if ( ! is_array( $intermediate ) || empty( $intermediate['file'] ) || empty( $intermediate['width'] ) || empty( $intermediate['height'] ) ) {
+		return $downsize;
+	}
+
+	$local_key = wpsanyueimg_attachment_file_key( $metadata['file'], $intermediate['file'] );
+	$remote_map = get_post_meta( (int) $attachment_id, '_wpsanyueimg_remote_map', true );
+	$remote_key = wpsanyueimg_remote_key_for_local_file( $remote_map, $local_key );
+	$remote_url = wpsanyueimg_remote_url_from_key( $remote_key );
+
+	if ( '' === $remote_url ) {
+		return $downsize;
+	}
+
+	return array( $remote_url, (int) $intermediate['width'], (int) $intermediate['height'], true );
+}
+
+function wpsanyueimg_filter_calculate_image_srcset_meta( $image_meta, $size_array, $image_src, $attachment_id ) {
+	if ( ! is_array( $image_meta ) || empty( $image_meta['file'] ) || empty( $image_meta['sizes'] ) || (int) $attachment_id <= 0 ) {
+		return $image_meta;
+	}
+
+	$remote_map = get_post_meta( (int) $attachment_id, '_wpsanyueimg_remote_map', true );
+	$local_main_key = wpsanyueimg_normalize_attachment_file_key( $image_meta['file'] );
+	$main_remote_key = wpsanyueimg_remote_key_for_local_file( $remote_map, $local_main_key );
+	$wpsanyueimg_options = wpsanyueimg_get_options();
+	$base_url = is_array( $wpsanyueimg_options ) ? ( $wpsanyueimg_options['imgbed_base_url'] ?? '' ) : '';
+	$main_remote_url = wpsanyueimg_remote_url_from_key( $main_remote_key, $base_url );
+
+	if ( '' === $main_remote_key || '' === $main_remote_url ) {
+		return $image_meta;
+	}
+
+	$image_path = wp_parse_url( (string) $image_src, PHP_URL_PATH );
+	if ( ! is_string( $image_path ) || '' === $image_path ) {
+		return $image_meta;
+	}
+
+	$current_remote_key = '';
+	foreach ( $remote_map as $remote_key ) {
+		if ( ! is_string( $remote_key ) ) {
+			continue;
+		}
+
+		$remote_key = wpsanyueimg_normalize_attachment_file_key( $remote_key );
+		$suffix = '/file/' . $remote_key;
+		if ( '' !== $remote_key && strlen( $image_path ) >= strlen( $suffix ) && substr( $image_path, -strlen( $suffix ) ) === $suffix ) {
+			$current_remote_key = $remote_key;
+			break;
+		}
+	}
+
+	if ( '' === $current_remote_key ) {
+		return $image_meta;
+	}
+
+	$remote_urls_by_basename = array();
+	foreach ( $remote_map as $local_key => $remote_key ) {
+		$remote_key = wpsanyueimg_remote_key_for_local_file( $remote_map, $local_key );
+		$remote_url = wpsanyueimg_remote_url_from_key( $remote_key, $base_url );
+		if ( '' !== $remote_key && '' !== $remote_url ) {
+			$remote_urls_by_basename[ wp_basename( $remote_key ) ] = $remote_url;
+		}
+	}
+
+	// WordPress matches srcset candidates against the current filename; only this temporary metadata copy is rewritten.
+	$image_meta['_wpsanyueimg_remote_urls_by_basename'] = $remote_urls_by_basename;
+	$image_meta['_wpsanyueimg_remote_main_url'] = $main_remote_url;
+	$image_meta['_wpsanyueimg_remote_main_width'] = (int) ( $image_meta['width'] ?? 0 );
+	$image_meta['_wpsanyueimg_srcset_current_basename'] = wp_basename( $current_remote_key );
+	$image_meta['_wpsanyueimg_remote_main_basename'] = wp_basename( $main_remote_key );
+	$image_meta['file'] = $current_remote_key;
+
+	foreach ( $image_meta['sizes'] as $size_name => $size_data ) {
+		if ( ! is_array( $size_data ) || empty( $size_data['file'] ) ) {
+			continue;
+		}
+
+		$local_key = wpsanyueimg_attachment_file_key( $local_main_key, $size_data['file'] );
+		$remote_key = wpsanyueimg_remote_key_for_local_file( $remote_map, $local_key );
+		if ( '' !== $remote_key ) {
+			$image_meta['sizes'][ $size_name ]['file'] = wp_basename( $remote_key );
+		}
+	}
+
+	return $image_meta;
+}
+
+function wpsanyueimg_filter_calculate_image_srcset( $sources, $size_array, $image_src, $image_meta, $attachment_id ) {
+	if ( ! is_array( $sources ) || ! is_array( $image_meta ) || empty( $image_meta['_wpsanyueimg_remote_urls_by_basename'] ) ) {
+		return $sources;
+	}
+
+	$remote_urls = $image_meta['_wpsanyueimg_remote_urls_by_basename'];
+	$current_basename = (string) ( $image_meta['_wpsanyueimg_srcset_current_basename'] ?? '' );
+	$main_basename = (string) ( $image_meta['_wpsanyueimg_remote_main_basename'] ?? '' );
+	$main_width = (int) ( $image_meta['_wpsanyueimg_remote_main_width'] ?? 0 );
+	$main_url = (string) ( $image_meta['_wpsanyueimg_remote_main_url'] ?? '' );
+
+	foreach ( $sources as &$source ) {
+		if ( ! is_array( $source ) || empty( $source['url'] ) ) {
+			continue;
+		}
+
+		$source_path = wp_parse_url( (string) $source['url'], PHP_URL_PATH );
+		if ( ! is_string( $source_path ) || '' === $source_path ) {
+			continue;
+		}
+
+		$basename = wp_basename( $source_path );
+		if ( '' !== $main_url && $main_width > 0 && (int) ( $source['value'] ?? 0 ) === $main_width && $basename === $current_basename && $basename !== $main_basename ) {
+			$source['url'] = $main_url;
+		} elseif ( isset( $remote_urls[ $basename ] ) ) {
+			$source['url'] = $remote_urls[ $basename ];
+		}
+	}
+	unset( $source );
+
+	return $sources;
+}
+
 function wpsanyueimg_save_remote_mapping( $attachment_id, $local_key, $upload_result, $is_main = false ) {
 	$attachment_id = (int) $attachment_id;
 	if ( $attachment_id <= 0 || ! is_array( $upload_result ) ) {
