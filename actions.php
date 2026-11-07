@@ -769,46 +769,162 @@ function wpsanyueimg_remote_key_for_local_file( $remote_map, $local_key ) {
 	return wpsanyueimg_normalize_attachment_file_key( $remote_map[ $local_key ] );
 }
 
+/**
+ * 从已记录的远程主图 URL 中取出 ImgBed 访问前缀（scheme://host[/子目录]，不含 /file/）。
+ *
+ * 上传接口返回的地址可能和设置里的 imgbed_base_url 不一致（自定义域名、CDN、反代子目录），
+ * 尺寸图必须沿用同一个前缀才不会拼错。
+ *
+ * @param string $remote_url 已保存的远程主图 URL。
+ * @return string 形如 https://cdn.example.com 的前缀，解析失败时返回空字符串。
+ */
+function wpsanyueimg_remote_url_prefix( $remote_url ) {
+	$remote_url = trim( (string) $remote_url );
+	if ( '' === $remote_url ) {
+		return '';
+	}
+
+	$position = strpos( $remote_url, '/file/' );
+	if ( false === $position || 0 === $position ) {
+		return '';
+	}
+
+	return substr( $remote_url, 0, $position );
+}
+
+/**
+ * 把本地文件 key 解析成真实的远程 URL。
+ *
+ * @param array  $remote_map 本地 key => 远程 key 的映射表。
+ * @param string $local_key  本地文件 key，例如 computer/2026/06/xxx-300x169.jpg。
+ * @param string $prefix     远程访问前缀，为空时回落到设置里的 imgbed_base_url。
+ * @return string 远程 URL，解析失败时返回空字符串。
+ */
+function wpsanyueimg_remote_url_for_local_file( $remote_map, $local_key, $prefix = '' ) {
+	$remote_key = wpsanyueimg_remote_key_for_local_file( $remote_map, $local_key );
+	if ( '' === $remote_key ) {
+		return '';
+	}
+
+	if ( '' !== $prefix ) {
+		$remote_url = wpsanyueimg_normalize_remote_url( '/file/' . $remote_key, $prefix );
+		if ( '' !== $remote_url ) {
+			return $remote_url;
+		}
+	}
+
+	return wpsanyueimg_remote_url_from_key( $remote_key );
+}
+
+/**
+ * 按 URL 路径的规则对 key 做百分号编码（保留 / 分隔符，已经是编码形式的不重复编码）。
+ *
+ * 核心用 $image_src 和 sizes[*]['file'] 做字符串比对，两者编码形式不一致就匹配不上。
+ *
+ * @param string $remote_key 远程文件 key。
+ * @return string 编码后的 key。
+ */
+function wpsanyueimg_encode_remote_key( $remote_key ) {
+	$remote_key = wpsanyueimg_normalize_attachment_file_key( $remote_key );
+	if ( '' === $remote_key ) {
+		return '';
+	}
+
+	$segments = explode( '/', $remote_key );
+	foreach ( $segments as $index => $segment ) {
+		$segments[ $index ] = rawurlencode( rawurldecode( $segment ) );
+	}
+
+	return implode( '/', $segments );
+}
+
+/**
+ * 修正 image_downsize() 拼接尺寸图地址的错误。
+ *
+ * 核心用 str_replace( wp_basename( $img_url ), $intermediate['file'], $img_url ) 生成尺寸图地址，
+ * 而 ImgBed 上传时会给文件名加时间戳前缀，替换后得到的是本地占位地址（必定 404）。
+ * 这里改用 _wpsanyueimg_remote_map 里登记的真实远程 key 拼地址。
+ *
+ * @param bool|array   $downsize      是否短路 image_downsize()，核心传入 false。
+ * @param int          $attachment_id 附件 ID。
+ * @param string|int[] $size          请求的尺寸。
+ * @return bool|array
+ */
 function wpsanyueimg_filter_image_downsize( $downsize, $attachment_id, $size ) {
-	if ( $downsize || ! wp_attachment_is_image( (int) $attachment_id ) ) {
+	$attachment_id = (int) $attachment_id;
+	if ( $downsize || $attachment_id <= 0 || ! wp_attachment_is_image( $attachment_id ) ) {
 		return $downsize;
 	}
 
-	$metadata = wp_get_attachment_metadata( (int) $attachment_id );
+	$remote_map = get_post_meta( $attachment_id, '_wpsanyueimg_remote_map', true );
+	if ( ! is_array( $remote_map ) || empty( $remote_map ) ) {
+		return $downsize;
+	}
+
+	// image_get_intermediate_size() 内部会再读一次元数据，这里只是为了拿到主文件名拼相对 key。
+	$metadata = wp_get_attachment_metadata( $attachment_id );
 	if ( ! is_array( $metadata ) || empty( $metadata['file'] ) ) {
 		return $downsize;
 	}
 
-	$intermediate = image_get_intermediate_size( (int) $attachment_id, $size );
+	$intermediate = image_get_intermediate_size( $attachment_id, $size );
 	if ( ! is_array( $intermediate ) || empty( $intermediate['file'] ) || empty( $intermediate['width'] ) || empty( $intermediate['height'] ) ) {
 		return $downsize;
 	}
 
+	$stored_main_url = (string) get_post_meta( $attachment_id, '_wpsanyueimg_remote_url', true );
 	$local_key = wpsanyueimg_attachment_file_key( $metadata['file'], $intermediate['file'] );
-	$remote_map = get_post_meta( (int) $attachment_id, '_wpsanyueimg_remote_map', true );
-	$remote_key = wpsanyueimg_remote_key_for_local_file( $remote_map, $local_key );
-	$remote_url = wpsanyueimg_remote_url_from_key( $remote_key );
+	$remote_url = wpsanyueimg_remote_url_for_local_file( $remote_map, $local_key, wpsanyueimg_remote_url_prefix( $stored_main_url ) );
+
+	if ( '' === $remote_url ) {
+		// 这个尺寸没有远程副本（当初上传失败）：退回远程主图，别把 CDN 上不存在的地址交给浏览器。
+		$remote_url = $stored_main_url;
+	}
 
 	if ( '' === $remote_url ) {
 		return $downsize;
 	}
 
-	return array( $remote_url, (int) $intermediate['width'], (int) $intermediate['height'], true );
+	$width  = (int) $intermediate['width'];
+	$height = (int) $intermediate['height'];
+	if ( function_exists( 'image_constrain_size_for_editor' ) ) {
+		// 和核心保持一致，仍然过一遍 content_width 约束。
+		list( $width, $height ) = image_constrain_size_for_editor( $width, $height, $size );
+	}
+
+	// 第四个参数必须是 true：告诉核心这已经是最终地址，不要再拿本地文件名二次拼接。
+	// 代价是跳过核心的 $meta['thumb'] 回退与 PDF 的 sizes['full'] 分支，本过滤器只处理图片，可接受。
+	return array( $remote_url, $width, $height, true );
 }
 
+/**
+ * 临时改写 srcset 用的元数据，让核心能匹配到被 ImgBed 改过名的文件。
+ *
+ * 只修改这个过滤器拿到的元数据副本，不会写回数据库。
+ *
+ * @param array  $image_meta    附件元数据。
+ * @param int[]  $size_array    请求的宽高。
+ * @param string $image_src     当前图片地址。
+ * @param int    $attachment_id 附件 ID。
+ * @return array
+ */
 function wpsanyueimg_filter_calculate_image_srcset_meta( $image_meta, $size_array, $image_src, $attachment_id ) {
-	if ( ! is_array( $image_meta ) || empty( $image_meta['file'] ) || empty( $image_meta['sizes'] ) || (int) $attachment_id <= 0 ) {
+	$attachment_id = (int) $attachment_id;
+	if ( ! is_array( $image_meta ) || empty( $image_meta['file'] ) || empty( $image_meta['sizes'] ) || $attachment_id <= 0 ) {
 		return $image_meta;
 	}
 
-	$remote_map = get_post_meta( (int) $attachment_id, '_wpsanyueimg_remote_map', true );
+	$remote_map = get_post_meta( $attachment_id, '_wpsanyueimg_remote_map', true );
 	$local_main_key = wpsanyueimg_normalize_attachment_file_key( $image_meta['file'] );
 	$main_remote_key = wpsanyueimg_remote_key_for_local_file( $remote_map, $local_main_key );
-	$wpsanyueimg_options = wpsanyueimg_get_options();
-	$base_url = is_array( $wpsanyueimg_options ) ? ( $wpsanyueimg_options['imgbed_base_url'] ?? '' ) : '';
-	$main_remote_url = wpsanyueimg_remote_url_from_key( $main_remote_key, $base_url );
+	if ( '' === $main_remote_key ) {
+		return $image_meta;
+	}
 
-	if ( '' === $main_remote_key || '' === $main_remote_url ) {
+	// 优先沿用上传时记录的远程地址前缀，自定义域名/子目录下也不会和设置里的 base_url 对不上。
+	$remote_prefix = wpsanyueimg_remote_url_prefix( get_post_meta( $attachment_id, '_wpsanyueimg_remote_url', true ) );
+	$main_remote_url = wpsanyueimg_remote_url_for_local_file( $remote_map, $local_main_key, $remote_prefix );
+	if ( '' === $main_remote_url ) {
 		return $image_meta;
 	}
 
@@ -817,17 +933,30 @@ function wpsanyueimg_filter_calculate_image_srcset_meta( $image_meta, $size_arra
 		return $image_meta;
 	}
 
+	// 核心传进来的地址可能是百分号编码（中文、空格文件名），映射表里的 key 也可能，两边都解码后再比；
+	// 取最长匹配，避免短 key 抢先命中。命中的 key 仍保留原始形式，用来拼真实可访问的地址。
+	$decoded_image_path = rawurldecode( $image_path );
 	$current_remote_key = '';
+	$current_suffix_length = 0;
 	foreach ( $remote_map as $remote_key ) {
 		if ( ! is_string( $remote_key ) ) {
 			continue;
 		}
 
 		$remote_key = wpsanyueimg_normalize_attachment_file_key( $remote_key );
-		$suffix = '/file/' . $remote_key;
-		if ( '' !== $remote_key && strlen( $image_path ) >= strlen( $suffix ) && substr( $image_path, -strlen( $suffix ) ) === $suffix ) {
+		if ( '' === $remote_key ) {
+			continue;
+		}
+
+		$suffix = rawurldecode( '/file/' . $remote_key );
+		$suffix_length = strlen( $suffix );
+		if ( $suffix_length <= $current_suffix_length || strlen( $decoded_image_path ) < $suffix_length ) {
+			continue;
+		}
+
+		if ( substr( $decoded_image_path, -$suffix_length ) === $suffix ) {
 			$current_remote_key = $remote_key;
-			break;
+			$current_suffix_length = $suffix_length;
 		}
 	}
 
@@ -835,22 +964,30 @@ function wpsanyueimg_filter_calculate_image_srcset_meta( $image_meta, $size_arra
 		return $image_meta;
 	}
 
+	// 核心用 $image_src 和 sizes[*]['file'] 做 strpos 比对来确定当前图，两边编码形式必须一致：
+	// 如果 $image_src 是百分号编码形式（编辑器/浏览器输出的中文、空格文件名），改写出来的文件名也要跟着编码。
+	$encode_filenames = false === strpos( $image_path, wp_basename( $current_remote_key ) );
+
+	// basename => 真实远程 URL，供 wpsanyueimg_filter_calculate_image_srcset() 替换候选地址，避免重复反查。
 	$remote_urls_by_basename = array();
 	foreach ( $remote_map as $local_key => $remote_key ) {
-		$remote_key = wpsanyueimg_remote_key_for_local_file( $remote_map, $local_key );
-		$remote_url = wpsanyueimg_remote_url_from_key( $remote_key, $base_url );
-		if ( '' !== $remote_key && '' !== $remote_url ) {
-			$remote_urls_by_basename[ wp_basename( $remote_key ) ] = $remote_url;
+		$remote_url = wpsanyueimg_remote_url_for_local_file( $remote_map, $local_key, $remote_prefix );
+		if ( '' === $remote_url ) {
+			continue;
 		}
+
+		$remote_key = wpsanyueimg_normalize_attachment_file_key( $remote_key );
+		$remote_urls_by_basename[ wp_basename( $remote_key ) ] = $remote_url;
 	}
 
-	// WordPress matches srcset candidates against the current filename; only this temporary metadata copy is rewritten.
 	$image_meta['_wpsanyueimg_remote_urls_by_basename'] = $remote_urls_by_basename;
 	$image_meta['_wpsanyueimg_remote_main_url'] = $main_remote_url;
 	$image_meta['_wpsanyueimg_remote_main_width'] = (int) ( $image_meta['width'] ?? 0 );
 	$image_meta['_wpsanyueimg_srcset_current_basename'] = wp_basename( $current_remote_key );
 	$image_meta['_wpsanyueimg_remote_main_basename'] = wp_basename( $main_remote_key );
-	$image_meta['file'] = $current_remote_key;
+	// 核心会拿 wp_basename( $image_meta['file'] ) 追加“原图”候选，这里换成当前尺寸的远程 basename，
+	// 再由 srcset 过滤器整段替换成真实远程地址。
+	$image_meta['file'] = $encode_filenames ? wpsanyueimg_encode_remote_key( $current_remote_key ) : $current_remote_key;
 
 	foreach ( $image_meta['sizes'] as $size_name => $size_data ) {
 		if ( ! is_array( $size_data ) || empty( $size_data['file'] ) ) {
@@ -859,14 +996,30 @@ function wpsanyueimg_filter_calculate_image_srcset_meta( $image_meta, $size_arra
 
 		$local_key = wpsanyueimg_attachment_file_key( $local_main_key, $size_data['file'] );
 		$remote_key = wpsanyueimg_remote_key_for_local_file( $remote_map, $local_key );
-		if ( '' !== $remote_key ) {
-			$image_meta['sizes'][ $size_name ]['file'] = wp_basename( $remote_key );
+		if ( '' === $remote_key ) {
+			continue;
 		}
+
+		$size_file = wp_basename( $remote_key );
+		$image_meta['sizes'][ $size_name ]['file'] = $encode_filenames ? wpsanyueimg_encode_remote_key( $size_file ) : $size_file;
 	}
 
 	return $image_meta;
 }
 
+/**
+ * 把 srcset 候选地址替换成真实的远程 URL。
+ *
+ * 换不掉说明这个尺寸没有登记到 _wpsanyueimg_remote_map，本地也没有对应文件，
+ * 保留核心拼出来的占位地址只会 404，直接丢掉这个候选。
+ *
+ * @param array  $sources       候选地址列表。
+ * @param int[]  $size_array    请求的宽高。
+ * @param string $image_src     当前图片地址。
+ * @param array  $image_meta    附件元数据。
+ * @param int    $attachment_id 附件 ID。
+ * @return array
+ */
 function wpsanyueimg_filter_calculate_image_srcset( $sources, $size_array, $image_src, $image_meta, $attachment_id ) {
 	if ( ! is_array( $sources ) || ! is_array( $image_meta ) || empty( $image_meta['_wpsanyueimg_remote_urls_by_basename'] ) ) {
 		return $sources;
@@ -878,24 +1031,29 @@ function wpsanyueimg_filter_calculate_image_srcset( $sources, $size_array, $imag
 	$main_width = (int) ( $image_meta['_wpsanyueimg_remote_main_width'] ?? 0 );
 	$main_url = (string) ( $image_meta['_wpsanyueimg_remote_main_url'] ?? '' );
 
-	foreach ( $sources as &$source ) {
-		if ( ! is_array( $source ) || empty( $source['url'] ) ) {
-			continue;
-		}
-
-		$source_path = wp_parse_url( (string) $source['url'], PHP_URL_PATH );
+	foreach ( $sources as $width => $source ) {
+		$source_path = is_array( $source ) && ! empty( $source['url'] ) ? wp_parse_url( (string) $source['url'], PHP_URL_PATH ) : '';
 		if ( ! is_string( $source_path ) || '' === $source_path ) {
+			unset( $sources[ $width ] );
 			continue;
 		}
 
-		$basename = wp_basename( $source_path );
+		// 候选地址可能是百分号编码形式，映射表里存的是原始文件名，统一解码后再比对。
+		$basename = rawurldecode( wp_basename( $source_path ) );
+
+		// 核心追加的“原图”候选：宽度等于原图宽度，但文件名还是当前尺寸的名字，必须换成远程主图地址。
 		if ( '' !== $main_url && $main_width > 0 && (int) ( $source['value'] ?? 0 ) === $main_width && $basename === $current_basename && $basename !== $main_basename ) {
-			$source['url'] = $main_url;
-		} elseif ( isset( $remote_urls[ $basename ] ) ) {
-			$source['url'] = $remote_urls[ $basename ];
+			$sources[ $width ]['url'] = $main_url;
+			continue;
 		}
+
+		if ( isset( $remote_urls[ $basename ] ) ) {
+			$sources[ $width ]['url'] = $remote_urls[ $basename ];
+			continue;
+		}
+
+		unset( $sources[ $width ] );
 	}
-	unset( $source );
 
 	return $sources;
 }
