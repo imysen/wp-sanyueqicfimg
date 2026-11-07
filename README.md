@@ -57,6 +57,13 @@ WordPress 媒体库对接 [CloudFlare ImgBed](https://cfbed.sanyue.de/) 的插�
 - `remote_delete_results`：每个 key 的删除结果（状态码/错误信息）
 - `remote_delete_exception`：删除过程异常
 
+## 升级说明
+
+- 从 **1.1** 升级到 **1.2** 不需要额外操作，配置与已上传媒体不会受影响。
+- 本版修复了远程缩略图地址拼接错误（1.1 会输出图床上不存在的占位地址、中文文件名时 srcset 可能为空）。
+- 修复基于附件元数据 `_wpsanyueimg_remote_map`：**1.2 之前上传且未记录该元数据的旧附件不会自动修复**，仍按 WordPress 默认规则输出地址。如需修正，重新上传该媒体即可。
+- 若图床使用了自定义域名或反代子目录，升级后新上传的媒体会自动沿用上传返回的地址前缀；历史附件如果保存的地址不含 `/file/`，会回落到「Cloudflare-ImgBed 项目地址」配置。
+
 ## 卸载
 
 卸载插件时会删除 `wpsanyueimg_options` 配置项。
